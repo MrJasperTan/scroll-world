@@ -9,8 +9,9 @@ description: >
   story beats/sections, and brand kit, then generates cohesive scenes + seamless camera
   clips with Higgsfield and wires a portable, framework-agnostic scroll-scrub engine.
   The video chain renders through Monid by default (Seedance 2.0, pay-per-clip
-  USD — capability re-checked each build, see Step 4) with Higgsfield credits as
-  the fallback biller. Use when the user wants a "3D world" /
+  USD — capability re-checked each build, see Step 4), with **fal.ai** (Kling v3
+  Pro / Seedance, pay-per-clip, start+end frame conditioning) and Higgsfield
+  credits as the alternate billers. Use when the user wants a "3D world" /
   "browse-through-the-industry" hero, a scroll cinematic, a diorama landing, or to
   turn a business into a scrollable world.
 allowed-tools: Bash, Read, Write, Edit, AskUserQuestion, Skill
@@ -44,12 +45,21 @@ not the framework.
 
 ## Step 0 — Bootstrap
 
-1. **Monid CLI — the default video-chain backend.** Check `monid --version`,
-   `monid keys list` (active key) and `monid balance` — the chain is billed per
-   clip in USD (Step 1.7 has the numbers; a 1080p N=6 chain ≈ $27). If the CLI is
-   missing or the balance can't cover the chain, say so and fall back to
-   rendering the chain on Higgsfield credits instead — same model, same
-   pipeline, different biller (Step 4 → Monid backend).
+1. **Chain backend — three billers, Monid is the default.** Check the default
+   first: `monid --version`, `monid keys list` (active key) and `monid balance` —
+   the chain is billed per clip in USD (Step 1.7 has the numbers; a 1080p N=6
+   chain ≈ $27). If the CLI is missing or the balance can't cover the chain, say
+   so and offer the alternates rather than stopping:
+   - **fal.ai** (Step 4 → fal.ai backend) — pay-per-clip, no CLI needed, plain
+     HTTPS queue API. Preflight is a single call: `FAL_KEY` present in the
+     environment or a project `.env`, then
+     `curl -s -o /dev/null -w '%{http_code}' -X POST https://queue.fal.run/fal-ai/nano-banana-2
+     -H "Authorization: Key $FAL_KEY" -H 'Content-Type: application/json' -d '{"prompt":"test"}'`
+     → `200` means authenticated **and** funded. fal has no balance endpoint on
+     this path, so a completed cheap generation is the only real proof; treat a
+     `401/403` as unauthenticated and a `402` as out of funds.
+   - **Higgsfield credits** — same model, same pipeline, different biller
+     (Step 4 → Monid backend).
 2. **Higgsfield CLI — still required even on the Monid path**: it renders the
    scene stills (`gpt_image_2`) and is the home of the `kling3_0` NSFW fallback
    and the fallback chain. If `higgsfield` is not on `$PATH`, install per the
@@ -180,15 +190,33 @@ default. Cover:
      chain on the other biller is a reasonable rescue — but the serving stacks
      differ and cross-provider seam character is **untested**: eyeball the first
      rescued seam before rendering the rest, same as any model swap.
-   - **Stills source** (only offer if the Codex CLI is present, Step 0.5):
-     Higgsfield `gpt_image_2` (spends credits) vs **Codex `image_gen`** — the same
-     gpt-image-2 model billed to the ChatGPT subscription (zero credits; counts
-     toward Codex usage limits; 1536×1024 output — exactly 3:2, slightly under
-     Higgsfield's 2k). Stills are plain PNGs handed to `--start-image`, so the
-     video chain is indifferent to their source. Command in Step 2. **One source
-     for all N stills of a build** — the two render with slightly different
-     character (verified: Codex runs warmer/lighter), and mixing sources across
-     scenes reads as style drift, same reason the video chain uses one model.
+   - **Backend — fal.ai, the third biller** (wiring in pipeline.md → fal.ai
+     backend). Pay-per-clip USD like Monid, but reached over a plain HTTPS queue
+     API with no CLI to install — the lowest-setup path when `monid` is absent or
+     unfunded, and the only one whose stills, end-frames and clips all live on one
+     provider. Default models: `fal-ai/nano-banana-2` (stills),
+     `fal-ai/nano-banana-2/edit` (guided end frames), and
+     `fal-ai/kling-video/v3/pro/image-to-video` (clips, native `start_image_url` +
+     `end_image_url`). **Price it before you promise it** — fal publishes
+     per-model rates that move, and this skill deliberately records none: run the
+     Step 1.7 calibration (one still, one clip) and read the actual charge before
+     quoting a chain total. **Both architectures are qualified** — the two-probe
+     protocol passed on 2026-08-18 at 40.6/40.3/31.7 dB, which frame-locks harder
+     than Monid's seedance (Step 4 → fal.ai backend). No need to re-probe.
+   - **Stills source** — three options, offered by what's present:
+     Higgsfield `gpt_image_2` (spends credits); **Codex `image_gen`** (only offer
+     if the Codex CLI is present, Step 0.5) — the same gpt-image-2 model billed to
+     the ChatGPT subscription (zero credits; counts toward Codex usage limits;
+     1536×1024 output — exactly 3:2, slightly under Higgsfield's 2k); and **fal
+     `nano-banana-2`** (only offer if `FAL_KEY` is present, Step 0.1) —
+     pay-per-image, 16:9 at 1K/2K, and the natural pick when the chain is already
+     on fal because its result URLs feed the clip model directly with no upload
+     step. Stills are plain PNGs handed to `--start-image`, so the video chain is
+     otherwise indifferent to their source. Command in Step 2. **One source for
+     all N stills of a build** — they render with slightly different character
+     (verified: Codex runs warmer/lighter than Higgsfield), and mixing sources
+     across scenes reads as style drift, same reason the video chain uses one
+     model.
    - **Calibrate costs, don't guess.** The CLI exposes no pricing and plans differ.
      Run ONE still and ONE video first, diff `higgsfield workspace list` before/
      after, extrapolate to the full run, and warn the user whenever the estimate
@@ -313,11 +341,11 @@ Rules:
   the NSFW fallback for a single stubborn clip (Gotchas) — a slight character shift on
   one 5s connector beats a missing connector.
 - Default to `seedance_2_0`, rendered through **Monid by default** (per-clip USD —
-  next section) with Higgsfield credits as the fallback biller (Step 0.1/1.6); honor
-  a user's stated preference **only if the model qualifies** (frame-locking). If it
-  doesn't, say so and use a supported model — never ship a non-seamless build to
-  satisfy a model request. `kling3_0` and `seedance_2_0_mini` exist only on the
-  Higgsfield side.
+  next section), with **fal.ai** and Higgsfield credits as the alternate billers
+  (Step 0.1/1.6); honor a user's stated preference **only if the model qualifies**
+  (frame-locking). If it doesn't, say so and use a supported model — never ship a
+  non-seamless build to satisfy a model request. `kling3_0` and `seedance_2_0_mini`
+  exist only on the Higgsfield side; `kling-video/v3/pro` only on the fal side.
 - The pipeline scripts take the model as `$VMODEL` with per-model flags already cased
   out (`references/pipeline.md`).
 
@@ -365,6 +393,67 @@ advertised cell; (2) for connector duty, add a `last_frame` from a different
 still — the end must land on that composition (Seedance-style near-miss is fine,
 the crossfade covers it). Pass → pay-per-clip tier (arch A if start-only; full
 roster if start+end).
+
+### fal.ai backend — the third biller (QUALIFIED 2026-08-18, both probes passed)
+
+A plain HTTPS queue API, **no CLI to install** — the lowest-setup backend, and the
+only one where stills, guided end-frames and clips all come from one provider.
+Wiring in pipeline.md → "fal.ai backend".
+
+Default models:
+
+| Role | Model id |
+|---|---|
+| Still | `fal-ai/nano-banana-2` |
+| End frame (guided edit from the start frame) | `fal-ai/nano-banana-2/edit` |
+| Clip | `fal-ai/kling-video/v3/pro/image-to-video` |
+
+**Both probes of the qualification protocol PASSED on 2026-08-18** — measured, not
+assumed, against real 2K diorama stills. Do not re-run them for a routine build:
+
+| Probe | Measured | Threshold |
+|---|---|---|
+| **A — leg duty** (prompt + `start_image_url`) — frame 0 vs the input still | **40.6 dB** | ≳ 30 |
+| **B — connector duty** (+ `end_image_url`) — frame 0 vs start still | **40.3 dB** | ≳ 30 |
+| **B — connector duty** — last frame vs end still | **31.7 dB** | ≳ 30 |
+| *control: two unrelated stills, i.e. what "no match" looks like* | *15.4 dB* | — |
+
+So **`kling-video/v3/pro` frame-locks harder than Monid's seedance** (40.6/40.3 vs
+31.6, and 31.7 vs 27.5 on the end frame). The connector's landing frame was also
+eyeballed and genuinely lands on the target composition. **Both architectures are
+qualified on fal**, arch A additionally being the pipeline behind a shipped 6-scene
+build (`grand-jasper-tan-scrollworld`, `connectors: []`).
+
+Observed clip output: **1928×1072, 24 fps, 5.04 s, 121 frames** for `duration: "5"`.
+The result field was `.video.url`.
+
+The I/O contract differs from both other backends — four rules:
+
+1. **Queue, not blocking.** `POST https://queue.fal.run/<model-id>` with
+   `Authorization: Key $FAL_KEY` returns `{status:"IN_QUEUE", request_id, …}`.
+   Poll `…/requests/<id>/status` until `COMPLETED`, then GET `…/requests/<id>`
+   for the payload. Never expect the first response to carry a result.
+2. **Poll the APP id, not the model path** — this one costs an hour if you guess.
+   A nested model like `fal-ai/kling-video/v3/pro/image-to-video` is submitted at
+   its full path but polled at
+   `https://queue.fal.run/fal-ai/kling-video/requests/<id>/status`. The full path
+   returns **405 Method Not Allowed** on `/requests/…`, which reads like a broken
+   job rather than a wrong URL. (Measured 2026-08-18: app id → 202, full path and
+   `…/v3/pro` → 405.) Simplest fix: keep the `status_url` the submit response hands
+   back instead of constructing one.
+3. **Images go by public URL** (`start_image_url` / `end_image_url` /
+   `image_urls[]`), same as Monid. **fal→fal chaining is free of upload work** —
+   a `nano-banana-2` result is already a public `https://v3b.fal.media/...` URL you
+   can hand straight to the video model, which is fal's real ergonomic edge.
+4. **Locally-extracted frames upload natively — no Monid detour needed.** Arch A
+   feeds each leg the *previous leg's actual last frame*, which comes off ffmpeg as
+   a local PNG. fal's own storage takes it in two steps (verified 2026-08-18):
+   `POST https://rest.alpha.fal.ai/storage/upload/initiate?storage_type=fal-cdn-v3`
+   with `{content_type, file_name}` returns `{file_url, upload_url}`; `PUT` the
+   bytes to `upload_url`, then use `file_url`. Helper in pipeline.md §8.
+5. **No balance endpoint on this path.** A completed cheap generation is the only
+   real funding proof (Step 0.1). Read the charge from your fal dashboard during
+   the Step 1.7 calibration — do not quote a chain total from memory.
 
 ### A) Continuous forward take — RECOMMENDED for grounded / realistic / walkthrough
 One camera that only ever glides **forward**, first scene through last, as a single take.
@@ -612,6 +701,63 @@ into the rendered HTML; nothing about it is framework-specific.
 
 ## Step 8 — QA the seams (don't skip)
 
+### 8.0 First, QA the FLIGHT — seams passing does not mean the film works
+
+**Learned the hard way, 2026-08-18: a build can pass every seam check in 8.1 and still
+be rejected on sight.** Seam PSNR measures **position** continuity — does clip B start
+on the pixel clip A ended on. It says nothing about **motion** continuity — does the
+camera keep moving in a way that reads as one journey. A chain of frame-perfect seams
+whose camera goes close → wide → close → wide reads to a viewer as *"the scenes keep
+starting over"*, and no seam number will ever show it.
+
+So do these two cheap things **before** the browser work, and look at the output:
+
+**(a) The boundary strip — the camera path at a glance.** Tile the first and last frame
+of every segment, in playback order. Six rows of four tells you instantly whether the
+camera oscillates.
+
+```bash
+i=0; add(){ i=$((i+1)); ffmpeg -v error -y -i "$1" -vf "scale=440:-2,drawtext=text='$2':\
+x=8:y=8:fontsize=22:fontcolor=yellow:box=1:boxcolor=black@0.6" "$(printf 'strip_%02d.png' $i)"; }
+for n in $NAMES; do add "$WORK/first_$n.png" "$n IN"; add "$WORK/last_$n.png" "$n OUT"; done
+# ...interleave conn first/last frames the same way, then:
+ffmpeg -v error -y -pattern_type glob -i 'strip_*.png' \
+  -filter_complex "tile=4x6:margin=6:padding=4:color=0x1a1a1a" -frames:v 1 chain_strip.png
+```
+
+**(b) The scroll-accurate preview — the definitive artifact.** Retime every clip so its
+duration is proportional to the scroll it is allotted, then concat. This is what the
+visitor actually experiences, in a file you and the user can both watch, without
+scrubbing a page. **The retime factors are also the diagnosis**: if they are not
+roughly uniform across all segments, your scroll allocation is wrong (see the
+`connScroll` gotcha).
+
+```bash
+K=3.5   # seconds of preview per viewport-height of scroll
+# for each segment, with $w = its scroll weight (section.scroll / connScroll):
+sdur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$src")
+factor=$(python3 -c "print(round($w*$K/$sdur,5))")
+ffmpeg -v error -y -i "$src" -vf "setpts=$factor*PTS,scale=960:-2" -an -r 30 \
+  -c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p "prev/$n.mp4"
+# then: ls prev/*.mp4 | sed "s|^|file '|;s|$|'|" > list.txt
+#       ffmpeg -y -f concat -safe 0 -i list.txt -c copy flight_preview.mp4
+```
+
+**(b2) If the clips are on a CDN rather than the page's own origin, check CORS
+BEFORE anything else.** The engine fetches clips into blobs, so a cross-origin clip
+without `Access-Control-Allow-Origin` fails in the browser while returning a clean
+`200` to curl. See the CORS entry in Gotchas — this is the failure most likely to
+survive every check you would otherwise run.
+
+**(c) Dead-frame check, when a segment feels stuck.** Sample every 0.2 s and PSNR
+consecutive samples; **≥ ~34 dB means nothing moved**. Measure before concluding —
+on the build above, eyeballing one bad clip led to blaming dead frames across the
+whole chain, and the measurement showed only 1 of 11 clips had the problem.
+
+Ship nothing until the preview reads as one continuous journey.
+
+### 8.1 Then the seams
+
 Drive the page in a headless browser and **verify frame continuity at the seams**, which
 is the thing most likely to be wrong:
 
@@ -727,6 +873,116 @@ is the thing most likely to be wrong:
   Until the wrapper is fixed, that endpoint can't chain — use Monid's seedance-2.0.
   (The model itself is fine — the same prompt+image via Higgsfield `minimax_hailuo`
   frame-locks.)
+- **fal returns `IN_QUEUE` and nothing else** → that IS the success response for a
+  submit. The result only exists after polling `…/requests/<id>/status` to
+  `COMPLETED` and then GETting `…/requests/<id>`. Treating the submit payload as the
+  result is the most common fal mistake.
+- **Titles render at body size, gaps between eyebrow/title/body vanish, nav pills run
+  together, or the video refuses to fill its scene** → a CSS reset on the host page is
+  beating the engine. This is the single most likely way a build looks broken inside a
+  framework while being pixel-perfect as a standalone file, and **nothing errors** — it
+  reads as a design mistake, not a bug.
+
+  Tailwind is the usual culprit: `@tailwind base` emits Preflight **unlayered**, and an
+  unlayered rule beats a layered one no matter how specific the layered one is. Four
+  Preflight rules collide with this engine:
+
+  ```css
+  h1,h2,h3,h4,h5,h6 { font-size: inherit; font-weight: inherit }  /* flattens titles */
+  p,h1..h6,ul       { margin: 0 }                                 /* collapses all copy gaps */
+  button            { padding: 0 }                                /* nav pills collide */
+  img,video         { max-width:100%; height:auto }               /* scene media collapses to a top band */
+  ```
+
+  **Since 2026-08-19 the engine no longer uses `@layer sw`** — it injects its CSS
+  unlayered and **prepends** it to `<head>` instead of appending. Unlayered means its
+  class selectors outrank a reset's element selectors on specificity; prepending
+  preserves the old intent, because the host's own CSS is already in the document and
+  therefore still comes later and still wins ties without `!important`. If you are
+  looking at an older copy of `scrub-engine.js` that still wraps in `@layer sw`, that is
+  the bug — change it rather than mirroring the engine's type scale into the host
+  stylesheet, which is duplication that silently drifts.
+
+  The one behaviour that changed: a host injecting CSS *after* mount now needs equal or
+  greater specificity, where a layer let it win outright.
+- **Clips 404-free but the film never plays; console says `ERR_FAILED 200 (OK)` and
+  "blocked by CORS policy"** → the engine loads clips with `fetch()` into a blob, not
+  by pointing `<video src>` at them, so **a clip on any host other than the page's own
+  origin needs CORS headers**. A CDN bucket does not send them by default.
+  **`curl` will not catch this** — it does not enforce CORS, so every object returns a
+  clean `200` while the browser silently discards the response. That is exactly how a
+  build ships "verified" and plays nothing.
+
+  Verify the way the browser actually asks, with an Origin header:
+
+  ```bash
+  curl -sI -H "Origin: https://your.site" "$BASE/vid/conn1.mp4" | grep -i access-control
+  curl -sI -X OPTIONS -H "Origin: https://your.site" \
+       -H "Access-Control-Request-Method: GET" \
+       -H "Access-Control-Request-Headers: range" "$BASE/vid/conn1.mp4"
+  ```
+
+  You need `Access-Control-Allow-Origin` on the GET, a `204` on the preflight, and
+  `range` in `Access-Control-Allow-Headers` — scrubbing is all range requests, so a
+  policy that allows GET but not the `range` header still fails.
+
+  On Cloudflare R2, `wrangler r2 bucket cors set <bucket> --file cors.json`. **The file
+  is NOT the S3 shape** — it wants a `rules` array with `allowed.origins` /
+  `allowed.methods` / `allowed.headers`, not `AllowedOrigins`/`AllowedMethods`:
+
+  ```json
+  { "rules": [ { "allowed": { "origins": ["https://your.site"],
+                              "methods": ["GET","HEAD"],
+                              "headers": ["range","content-type"] },
+                 "exposeHeaders": ["content-length","content-range","accept-ranges"],
+                 "maxAgeSeconds": 86400 } ] }
+  ```
+
+  List the real origins rather than `*`: the film is public but there is no reason to
+  let arbitrary sites hotlink the bandwidth.
+- **"The scenes keep starting over" / the film feels like it jumps** → the single
+  most likely report from a first arch-B build, and it is almost never the seams.
+  Check three things, cheapest first:
+  1. **`connScroll` vs `diveScroll`.** The default is `connScroll: 0.9` against
+     `diveScroll: 1.3` — i.e. the connector, which makes *by far* the biggest camera
+     move in the film (deep interior close-up all the way back out to a wide island
+     and across to the next), gets **less** scroll than a dive that barely moves.
+     Scroll travel must follow **how far the camera moves**, not how important the
+     scene is. On a 10s connector against 5s dives, `connScroll` ≈ **2×**
+     `diveScroll` makes perceived scrub speed uniform.
+  2. **Is there any shared space between islands?** If each connector pulls back to
+     reveal ONE island floating in black and then arrives at the next, nothing tells
+     the viewer these are places in the same world, so the pull-back reads as a cut
+     rather than travel. Fix it in the prompt: require that **midway, BOTH islands
+     are visible at once** — the first receding, the second growing. Verified
+     2026-08-18: this alone turned "jumping" into legible travel.
+  3. **Dead frames.** Measure, don't assume — sample every 0.2 s and PSNR
+     consecutive samples; ≥ ~34 dB means nothing moved. A 5 s connector that spends
+     1.4 s frozen wastes whatever scroll you give it. Trim, or re-render longer so
+     the move is distributed.
+- **arch B connectors want `duration: "10"`, not `"5"`.** Kling v3 pro accepts it
+  (verified 2026-08-18). A 5 s connector crams the largest move in the film into
+  ~1.4 s of actual travel; 10 s spreads it and drops the dead-tail fraction from
+  ~29% to ~10%. Dives stay at 5 s — they barely move.
+- **fal `/requests/<id>/status` returns 405** → you polled the full nested model
+  path. Poll the **app id**: `queue.fal.run/fal-ai/kling-video/requests/<id>/status`,
+  not `…/fal-ai/kling-video/v3/pro/image-to-video/requests/…`. Submit uses the full
+  path; polling does not. Keep the `status_url` from the submit response and this
+  cannot bite you.
+- **fal video result is empty but the job COMPLETED** → the output field name has
+  moved between Kling versions; try `.video.url` then `.video_url`, and dump the
+  whole payload before declaring failure (pipeline.md §8 does this). Observed
+  2026-08-18 on `kling-video/v3/pro`: `.video.url`.
+- **ffmpeg PSNR prints nothing during qualification** → `-v error` suppresses the
+  `psnr` filter's own output, so the probe looks like it produced no measurement.
+  Use `-lavfi "psnr=stats_file=-"` and read `psnr_avg`.
+- **fal rejects a local file path or data URL** → images must be public https URLs.
+  fal→fal chaining needs no upload (result URLs are already public); locally-extracted
+  frames need a host — fal storage, or the free Monid `sfs` helper (pipeline.md §7),
+  which works even on an unfunded Monid account.
+- **fal 401/403 vs 402** → 401/403 is a bad or missing `FAL_KEY`; 402 is an
+  unfunded account. There is no balance endpoint on the queue path, so a completed
+  cheap generation is the only real funding proof (Step 0.1).
 - **Monid billing surprises** → matrix/token-priced endpoints bill by selector match:
   pass every selector field explicitly (`model`, `resolution`, `duration`) and read
   `cost.value` off the run result after each clip. A big base64 field in any body can

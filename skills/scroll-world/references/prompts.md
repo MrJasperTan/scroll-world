@@ -22,13 +22,22 @@ Collect and write down:
   (pipeline §6b): portrait renders of every dive/connector +
   `clipMobile`/`connectorsMobile`/`stillMobile` wiring + the full mobile QA. The
   §6 crop encodes are a no-credits stopgap only.
+- `VIDEO_BACKEND` — which biller renders the chain: `monid` (default) |
+  `fal` | `higgsfield`. Preflighted at SKILL Step 0.1, chosen at Step 1.7.
+  Monid and fal are pay-per-clip USD; Higgsfield spends subscription credits.
 - `VIDEO_TIER` — default is `seedance_2_0` **via Monid** (pay-per-clip; previz =
   same endpoint at 480p, final at 1080p). Higgsfield-credit alternates: draft
   (`seedance_2_0_mini`) | standard (`seedance_2_0`) | alternate (`kling3_0`).
-  Chosen by cost at SKILL Step 1.7, with the estimated total stated before
-  anything renders.
+  On `VIDEO_BACKEND=fal` the clip model is
+  `fal-ai/kling-video/v3/pro/image-to-video` — **both architectures qualified
+  2026-08-18** at 40.6/40.3/31.7 dB, a harder frame-lock than seedance (SKILL
+  Step 4 → fal.ai backend). Chosen by cost at SKILL Step 1.7, with the estimated
+  total stated before anything renders.
 - `STILLS_SOURCE` — higgsfield (`gpt_image_2`, spends credits) | codex
-  (`image_gen`, subscription-billed; only offer when the Codex CLI is present).
+  (`image_gen`, subscription-billed; only offer when the Codex CLI is present) |
+  fal (`nano-banana-2`, pay-per-image; the natural pick when
+  `VIDEO_BACKEND=fal`, since its output URLs feed the clip model with no upload
+  step). **One source for all N stills of a build**, whichever you pick.
 
 ## Style preamble (default: clay diorama)
 

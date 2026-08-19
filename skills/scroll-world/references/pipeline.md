@@ -287,6 +287,110 @@ failure to watch for (it's why the harness exists): `minimax /v1/video_generatio
 still silently drops the image when `prompt` is present — image-only output proves
 nothing about steerability.
 
+## 8. fal.ai backend — Kling v3 Pro pay-per-clip (verified 2026-08-18)
+
+A plain HTTPS queue API — no CLI. Use these in place of the §2/§4 loops when
+`VIDEO_BACKEND=fal`. **Qualification: BOTH probes passed 2026-08-18** — leg duty
+40.6 dB, connector start 40.3 dB, connector end 31.7 dB (control 15.4 dB). Harder
+frame-lock than Monid's seedance; `gen_conn_fal` below is qualified for arch B.
+Full numbers in SKILL Step 4 → fal.ai backend.
+
+Auth is `Authorization: Key $FAL_KEY`. Every call is submit → poll → fetch; the
+first response never carries a result.
+
+```bash
+: "${FAL_KEY:?export FAL_KEY first}"
+FAL_STILL=fal-ai/nano-banana-2
+FAL_EDIT=fal-ai/nano-banana-2/edit
+FAL_VIDEO=fal-ai/kling-video/v3/pro/image-to-video
+# Poll base = the APP id, NOT the model path. The full nested path 405s on
+# /requests/… , which reads like a dead job rather than a wrong URL.
+FAL_VIDEO_APP=fal-ai/kling-video
+
+# submit a job, print its request_id
+fal_submit() { # model bodyJson
+  curl -fsS -X POST "https://queue.fal.run/$1" \
+    -H "Authorization: Key $FAL_KEY" -H 'Content-Type: application/json' \
+    -d @"$2" | jq -r '.request_id'
+}
+
+# block until COMPLETED, then print the result payload. $1 is the APP id.
+fal_wait() { # appId requestId
+  local base="https://queue.fal.run/$1/requests/$2"
+  while :; do
+    case "$(curl -fsS -H "Authorization: Key $FAL_KEY" "$base/status" \
+            | jq -r '.status')" in
+      COMPLETED) break ;;
+      IN_QUEUE|IN_PROGRESS) sleep 5 ;;
+      *) echo "fal job $2 failed" >&2; return 1 ;;
+    esac
+  done
+  curl -fsS -H "Authorization: Key $FAL_KEY" "$base"
+}
+
+# upload a LOCAL frame (an ffmpeg-extracted last frame) and print its public URL.
+# Two steps: initiate returns {file_url, upload_url}; PUT the bytes; use file_url.
+fal_upload() { # localPng
+  local init file_url upload_url
+  init=$(curl -fsS -X POST \
+    "https://rest.alpha.fal.ai/storage/upload/initiate?storage_type=fal-cdn-v3" \
+    -H "Authorization: Key $FAL_KEY" -H 'Content-Type: application/json' \
+    -d "{\"content_type\":\"image/png\",\"file_name\":\"$(basename "$1")\"}")
+  file_url=$(echo "$init" | jq -r '.file_url')
+  upload_url=$(echo "$init" | jq -r '.upload_url')
+  curl -fsS -X PUT -H 'Content-Type: image/png' --data-binary @"$1" "$upload_url" >/dev/null
+  echo "$file_url"
+}
+
+# --- stills. Result URLs are public and feed the video model directly ($0 upload).
+gen_still_fal() { # name  -> writes $WORK/still_$1.png and $WORK/still_$1.url
+  jq -n --arg p "$(cat "$WORK/scene_$1.txt")" \
+    '{prompt:$p, num_images:1, aspect_ratio:"16:9", resolution:"2K",
+      output_format:"png"}' > "$WORK/still_$1.body.json"
+  rid=$(fal_submit "$FAL_STILL" "$WORK/still_$1.body.json")
+  url=$(fal_wait "$FAL_STILL" "$rid" | jq -r '.images[0].url')  # nano-banana is not nested
+  echo "$url" > "$WORK/still_$1.url"
+  curl -fsSL "$url" -o "$WORK/still_$1.png"
+  echo "still $1 ok"
+}
+
+# --- arch A leg: start frame only. QUALIFIED (40.6 dB frame-lock, 2026-08-18).
+# $2 is a PUBLIC URL — either a still_*.url from above (already public, $0), or a
+# locally-extracted last frame passed through fal_upload() above.
+gen_dive_fal() { # name startUrl
+  jq -n --arg p "$(cat "$WORK/dive_$1.txt")" --arg s "$2" \
+    '{prompt:$p, start_image_url:$s, duration:"5", generate_audio:false}' \
+    > "$WORK/dive_$1.body.json"
+  rid=$(fal_submit "$FAL_VIDEO" "$WORK/dive_$1.body.json")
+  url=$(fal_wait "$FAL_VIDEO_APP" "$rid" | jq -r '.video.url // .video_url // empty')
+  [ -n "$url" ] && curl -fsSL "$url" -o "$WORK/dive_$1.mp4" \
+    && echo "dive $1 ok" || echo "dive $1 FAIL"
+}
+
+# --- arch B connector: start + end. QUALIFIED (start 40.3 dB, end 31.7 dB).
+gen_conn_fal() { # i startUrl endUrl
+  jq -n --arg p "$(cat "$WORK/conn_$1.txt")" --arg s "$2" --arg e "$3" \
+    '{prompt:$p, start_image_url:$s, end_image_url:$e, duration:"5",
+      generate_audio:false}' > "$WORK/conn_$1.body.json"
+  rid=$(fal_submit "$FAL_VIDEO" "$WORK/conn_$1.body.json")
+  url=$(fal_wait "$FAL_VIDEO_APP" "$rid" | jq -r '.video.url // .video_url // empty')
+  [ -n "$url" ] && curl -fsSL "$url" -o "$WORK/conn_$1.mp4" \
+    && echo "conn $1 ok" || echo "conn $1 FAIL"
+}
+```
+
+Notes specific to this backend:
+
+- **Result URLs expire.** Download immediately, same as Monid.
+- **The video result field has moved between model versions** — hence the
+  `.video.url // .video_url` fallback. If both are empty, dump the payload before
+  assuming a failure.
+- **Guided end frames** for arch B come from `$FAL_EDIT` with
+  `{prompt, image_urls:[<startUrl>], num_images:1, aspect_ratio:"16:9"}` — but the
+  Step 5 law still wins: prefer the **next dive's ACTUAL first frame** as the
+  end-image over a generated one.
+- **No balance endpoint.** A completed cheap generation is the funding check.
+
 ## Notes
 
 - `.[0].result_url` is the field on the `--wait --json` job object. `.min_result_url` is
@@ -304,3 +408,47 @@ nothing about steerability.
   `$WORK/*.err` for the reason.
 - Concurrency: launching ~5–6 gens at once is fine; much more can trigger transient
   credit/race errors — stagger or re-roll.
+
+## 9. Flight QA — measure motion, not just seams (SKILL Step 8.0)
+
+Seam PSNR proves position continuity and is blind to motion continuity. This is the
+tool that catches "the scenes keep starting over".
+
+```python
+# motion.py — where does a clip actually stop moving?
+#   usage: python3 motion.py assets/vid/*.mp4
+# Samples every 0.2s and PSNRs consecutive samples. >= STATIC dB == frozen.
+import subprocess, re, sys, os
+STATIC = 34.0
+
+def series(clip, step=0.2):
+    dur = float(subprocess.run(["ffprobe","-v","error","-show_entries","format=duration",
+        "-of","default=nw=1:nk=1",clip],capture_output=True,text=True).stdout.strip())
+    prev, out = None, []
+    for i in range(int(dur/step)):
+        t = round(i*step, 2); p = f"/tmp/_m_{os.getpid()}.png"
+        subprocess.run(["ffmpeg","-v","error","-y","-ss",str(t),"-i",clip,
+                        "-frames:v","1","-vf","scale=320:-2",p], check=True)
+        if prev:
+            r = subprocess.run(["ffmpeg","-hide_banner","-loglevel","info","-i",p,"-i",prev,
+                "-lavfi","psnr=stats_file=-","-f","null","-"],capture_output=True,text=True)
+            m = re.search(r"psnr_avg:([0-9.]+|inf)", r.stderr + r.stdout)
+            out.append((t, float(m.group(1)) if m and m.group(1) != "inf" else 99.0))
+        prev = f"/tmp/_p_{os.getpid()}.png"; subprocess.run(["cp", p, prev])
+    return dur, out
+
+for clip in sys.argv[1:]:
+    dur, s = series(clip)
+    moving = [t for t, v in s if v < STATIC]
+    head = min(moving, default=dur); last = max(moving, default=0.0)
+    print(f"{os.path.basename(clip):14} dur={dur:5.2f}  motion {head:4.2f}-{last:4.2f}s  "
+          f"dead head={head:4.2f}s tail={dur-last:4.2f}s")
+```
+
+Reference numbers from a good arch-B build (2026-08-18): 5 s dives showed 0.2–0.8 s
+dead head and 0.24 s tail; **5 s connectors crammed the largest move in the film into
+~1.4 s and sat frozen for the rest** — which is why arch-B connectors are rendered at
+`duration: "10"`. After the change, dead tails fell to 0.24–1.24 s out of 10 s.
+
+**`-v error` suppresses the psnr filter's own output** — use `stats_file=-` or the
+measurement silently returns nothing.

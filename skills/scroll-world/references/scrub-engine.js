@@ -435,12 +435,28 @@ function injectCSS() {
   }
   @media (prefers-reduced-motion:reduce){ .sw-hint i::after{animation:none;} .sw-pt{display:none;} }
   `;
-  // Wrap in a cascade layer so the page's own theme tokens (unlayered
-  // :root / .sw-root { --sw-bg / --sw-ink / --sw-accent … }) always win over
-  // these defaults, regardless of injection order. Enables clean dark themes.
+  // These used to be wrapped in `@layer sw` so a host page's unlayered theme tokens
+  // always won, regardless of injection order. That worked against a hand-written
+  // page and failed badly against a framework: an UNLAYERED rule beats a layered one
+  // no matter how specific the layered one is, so any CSS reset the host ships —
+  // Tailwind Preflight is the common one — silently defeated every rule in here that
+  // collided with it. Preflight's `h1..h6{font-size:inherit}`, `p{margin:0}`,
+  // `button{padding:0}` and `img,video{height:auto}` between them flattened the scene
+  // titles to body size, collapsed every gap in the copy, ran the nav pills together
+  // and stopped the video filling its scene. All of it silent: nothing errors, the
+  // page just looks wrong in ways that read as a design mistake.
+  //
+  // So: unlayered, and PREPENDED rather than appended. Unlayered means these class
+  // selectors outrank a reset's element selectors on specificity, as they should.
+  // Prepending preserves the original intent — the host's own CSS is already in the
+  // document when this runs, so it still comes later and still wins ties without
+  // needing !important.
+  //
+  // The one case that changes: a host injecting CSS *after* mount now needs equal or
+  // greater specificity to override, where a layer would have let it win outright.
   const style = document.createElement('style'); style.id = 'sw-css';
-  style.textContent = '@layer sw {\n' + css + '\n}';
-  document.head.appendChild(style);
+  style.textContent = css;
+  document.head.prepend(style);
 }
 
 // Expose for module + global use.
