@@ -195,11 +195,51 @@ function mountScrollWorld(container, config) {
     window.scrollTo({ top: seg.start + (seg.end - seg.start) * 0.5, behavior: reduce ? 'auto' : 'smooth' });
   }
 
-  function loadClip(s) {
+  // ---- clip loading: an EAGER, IN-ORDER prefetch queue -----------------------
+  // Loading a clip only once the visitor is nearly on top of it is the single most
+  // common reason a scroll-world "doesn't animate, it just jumps to the image":
+  // a multi-MB blob cannot arrive in the ~1s it takes to scroll into range, so the
+  // scene falls back to its still and then pops when the video finally lands.
+  // Instead we start fetching the whole chain in flight order at mount, a couple at
+  // a time, and let proximity only *reprioritise* — never initiate.
+  const LOADQ = [];
+  let inflight = 0;
+  const MAX_CONCURRENT = 2;
+
+  function enqueueClip(s, urgent) {
+    if (reduce || !s.clip || s.loading || s.done) return;
+    // URGENT means the visitor is about to be looking at this scene. Re-ordering the
+    // queue is not enough: with a concurrency cap, an urgent clip still waits behind
+    // whatever is already in flight, and on a tight connection that is exactly how a
+    // mid-chain scene arrives too late and shows its still. So an urgent clip bypasses
+    // the cap and starts NOW; the in-order background fill just carries on around it.
+    if (urgent) {
+      if (s.queued) { const i = LOADQ.indexOf(s); if (i >= 0) LOADQ.splice(i, 1); s.queued = false; }
+      inflight++;
+      loadClip(s, () => { inflight--; pumpQueue(); });
+      return;
+    }
+    if (s.queued) return;
+    s.queued = true;
+    LOADQ.push(s);
+    pumpQueue();
+  }
+
+  function pumpQueue() {
+    while (inflight < MAX_CONCURRENT && LOADQ.length) {
+      const s = LOADQ.shift();
+      s.queued = false;
+      inflight++;
+      loadClip(s, () => { inflight--; pumpQueue(); });
+    }
+  }
+
+  function loadClip(s, done) {
     // Under prefers-reduced-motion we never load the clips at all — the stills stay up
     // and simply cross-dissolve as you scroll. No scrubbed video motion, no decode cost.
-    if (reduce || s.loading || !s.clip) return;
+    if (reduce || s.loading || !s.clip) { if (done) done(); return; }
     s.loading = true;
+    const finish = () => { s.done = true; if (done) done(); done = null; };
     // Serve the lighter mobile encode on phones when one was provided.
     const url = (isMobile() && s.clipM) ? s.clipM : s.clip;
     fetch(url).then(r => r.ok ? r.blob() : Promise.reject(new Error('404')))
@@ -216,7 +256,8 @@ function mountScrollWorld(container, config) {
         v.addEventListener('seeked', () => { s.el.classList.add('has-clip'); }, { once: true });
         v.addEventListener('loadeddata', () => { try { v.pause(); } catch (e) {} if (userReady) primeVideo(v); });
         s.el.appendChild(v); s.video = v; s.hasClip = true;
-      }).catch(() => { s.loading = false; });
+        finish();
+      }).catch(() => { s.loading = false; s.queued = false; finish(); });
   }
 
   function read() {
@@ -227,7 +268,8 @@ function mountScrollWorld(container, config) {
 
     for (let i = 0; i < NSEG; i++) {
       const s = SEGMENTS[i];
-      if (y > s.start - 1.6 * vh && y < s.end + 1.6 * vh) loadClip(s);
+      // proximity only *reprioritises* — the queue below already started everything
+      if (y > s.start - 2.5 * vh && y < s.end + 2.5 * vh) enqueueClip(s, true);
       const local = clamp((y - s.start) / (s.end - s.start), 0, 1);
       s.target = s.linger ? lingerEase(local, s.linger) : local;
       let outside = 0;
@@ -324,6 +366,12 @@ function mountScrollWorld(container, config) {
   layout();
   requestAnimationFrame(raf);
 
+  // Start pulling the whole chain immediately, in flight order, so clips are in
+  // memory before the visitor scrolls to them. read() can still promote whatever is
+  // urgent to the front. Without this the page degrades to a slideshow of stills on
+  // any connection that is not very fast — see the comment on enqueueClip.
+  if (!reduce) SEGMENTS.forEach(s => enqueueClip(s, false));
+
   // ---- helpers ----
   function el(tag, cls) { const n = document.createElement(tag); if (cls) n.className = cls; return n; }
   function pad(n) { return String(n).padStart(2, '0'); }
@@ -383,7 +431,16 @@ function injectCSS() {
   .sw-stage{position:fixed;inset:0;z-index:10;pointer-events:none;}
   .sw-scene{position:absolute;inset:0;opacity:0;overflow:hidden;will-change:opacity;}
   .sw-scene__video,.sw-scene__still{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 42%;}
-  .sw-scene__still{will-change:transform;} .sw-scene.has-clip .sw-scene__still{opacity:0;} .sw-scene__video{z-index:1;}
+  /* A clip that lands mid-scene must not hard-cut over the still it replaces —
+     that swap is what reads as a "jump". Dissolve it instead. */
+  .sw-scene__still{will-change:transform;transition:opacity .5s ease;}
+  .sw-scene.has-clip .sw-scene__still{opacity:0;}
+  /* Do NOT gate the video's opacity on has-clip: a clip whose first seek target is
+     already ~0 may never fire a seeked event, and that scene's video would stay
+     invisible forever. It needs no gating — an unpainted video element draws nothing,
+     so the still beneath shows through until a real frame lands. Fading the still out
+     IS the dissolve. */
+  .sw-scene__video{z-index:1;}
   .sw-copylayer{position:fixed;inset:0;z-index:20;pointer-events:none;}
   .sw-copylayer::before{content:"";position:absolute;inset:0;width:min(58vw,780px);background:linear-gradient(90deg,var(--sw-bg) 0%,color-mix(in srgb,var(--sw-bg) 82%,transparent) 34%,color-mix(in srgb,var(--sw-bg) 40%,transparent) 62%,transparent 100%);}
   .sw-copy{position:absolute;left:clamp(18px,5vw,64px);top:50%;transform:translateY(-50%);width:min(42vw,460px);opacity:0;will-change:opacity,transform;}

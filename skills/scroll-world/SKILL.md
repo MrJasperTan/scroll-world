@@ -51,7 +51,15 @@ not the framework.
    chain ≈ $27). If the CLI is missing or the balance can't cover the chain, say
    so and offer the alternates rather than stopping:
    - **fal.ai** (Step 4 → fal.ai backend) — pay-per-clip, no CLI needed, plain
-     HTTPS queue API. Preflight is a single call: `FAL_KEY` present in the
+     HTTPS queue API.
+
+     > **This user HAS a fal.ai key. It is always available — never report it as
+     > missing, and never ask for it.** It lives at `~/.claude/secrets/fal.env`
+     > and is auto-sourced by `~/.bashrc`. If `$FAL_KEY` is somehow unset in a
+     > given shell, load it rather than concluding it is absent:
+     > `. ~/.claude/secrets/fal.env`
+
+     Preflight is a single call: `FAL_KEY` present in the
      environment or a project `.env`, then
      `curl -s -o /dev/null -w '%{http_code}' -X POST https://queue.fal.run/fal-ai/nano-banana-2
      -H "Authorization: Key $FAL_KEY" -H 'Content-Type: application/json' -d '{"prompt":"test"}'`
@@ -208,7 +216,7 @@ default. Cover:
      if the Codex CLI is present, Step 0.5) — the same gpt-image-2 model billed to
      the ChatGPT subscription (zero credits; counts toward Codex usage limits;
      1536×1024 output — exactly 3:2, slightly under Higgsfield's 2k); and **fal
-     `nano-banana-2`** (only offer if `FAL_KEY` is present, Step 0.1) —
+     `nano-banana-2`** (this user's `FAL_KEY` is always present — Step 0.1) —
      pay-per-image, 16:9 at 1K/2K, and the natural pick when the chain is already
      on fal because its result URLs feed the clip model directly with no upload
      step. Stills are plain PNGs handed to `--start-image`, so the video chain is
@@ -620,19 +628,41 @@ often gotten wrong:
    frozen. The robust fix is to **fetch each clip as a `Blob` and play it from an
    in-memory object URL** (blobs are always fully seekable). The engine does this.
    Because of it, you do **not** need all-intra video.
-2. **Don't shrink quality to get smooth seeks.** Encode at the **native resolution**
-   (1080p from Seedance — don't downscale), `crf ~20`, a **small GOP** (`-g 8`) rather
-   than all-intra (all-intra bloats an 8s clip to ~25 MB; GOP 8 is ~8 MB and scrubs
-   fine via blob). Strip audio, add faststart, and a light `unsharp` counters video
-   softness:
+2. **TRANSFER TIME is the binding constraint — not decode, not keyframes.** This is
+   the single most consequential number on the page, and the easiest to get wrong:
+   the engine fetches each clip as a whole blob before it can scrub a single frame,
+   so a chain that cannot *download* in time degrades to a slideshow of stills. Size
+   the chain against a real connection, not your laptop's.
+
+   Measured on a 7-clip build (2026-09-01), same source, same seams:
+
+   | Encode | Per clip | 7-clip chain | Scenes scrubbing @5 / @10 Mbps |
+   |---|---|---|---|
+   | 1920w crf20 ("native res, crf 20") | 4.5 MB | 31 MB | **0/7** / **5/7** |
+   | 1280w crf26 | 1.2 MB | 9.1 MB | **7/7** / **7/7** |
+
+   The two encodes were **visually indistinguishable** side by side — these models
+   output soft, low-detail video, so the extra bits buy nothing a viewer can see
+   while costing the entire effect. The 5/7 row is what a user reports as *"some of
+   the sections don't animate, it just jumps to the image."*
+
+   So: **downscale to ~1280w and use crf ~26** unless you have measured that a
+   larger encode still arrives in time. Keep the **small GOP** (`-g 8`) — that part
+   was always right, and it is what keeps seeking cheap. Strip audio, add faststart,
+   and a light `unsharp` counters video softness:
 
 ```bash
-ffmpeg -i src.mp4 -an -vf "unsharp=5:5:0.8:5:5:0.0" \
-  -c:v libx264 -preset slow -crf 20 -pix_fmt yuv420p \
+ffmpeg -i src.mp4 -an -vf "scale=1280:-2,unsharp=5:5:0.8:5:5:0.0" \
+  -c:v libx264 -preset slow -crf 26 -pix_fmt yuv420p \
   -g 8 -keyint_min 8 -sc_threshold 0 -movflags +faststart out.mp4
 ```
 
-Encode all 2N-1 clips (dives + connectors) with the same settings for uniform quality.
+   Budget rule of thumb: **keep the whole desktop chain under ~10 MB.** Extract the
+   scene **posters from the full-resolution source**, not from the shrunken clip —
+   posters are what paint first, they cost ~150 KB, and keeping them crisp costs
+   nothing in transfer.
+
+Encode all clips with the same settings for uniform quality.
 
 **Mobile encodes (only if the user opted in at Step 1.6).** The mobile version is
 the **native 9:16 portrait chain** (pipeline.md §6b): portrait renders of every dive and
@@ -802,6 +832,69 @@ is the thing most likely to be wrong:
   reads as a rewind. This is inherent to architecture B. For any grounded walkthrough use
   architecture A (one continuous forward take — legs chained from actual last frames, no
   pull-back, no `--end-image`); see Step 4.
+- **You re-encoded the clips (or swapped a photo) and the site still serves the old
+  ones — to you, but not to a fresh browser** → long-lived cache headers on
+  filenames that never change. A `Cache-Control: immutable, max-age=31536000` rule on
+  `/assets/vid/(.*)` is the natural thing to write for big media, and it is correct
+  only if the URL changes when the bytes do. It doesn't here: `arrival.mp4` is
+  `arrival.mp4` forever, so every returning visitor keeps the old file for a year.
+  This bites hardest right after you fix the transfer-size problem above — the people
+  who already suffered the broken version are exactly the ones pinned to the heavy
+  clips. Verify with `curl -sD- -o/dev/null <url> | grep -i 'cache-control\|age'`
+  and check `age:` is not large; a CDN `HIT` on the new bytes proves nothing about
+  what a returning *browser* holds.
+
+  Fix: version the URLs (`assets/vid/arrival.mp4?v=2`) and bump on every re-encode —
+  then `immutable` is both safe and maximally useful. Keep the **HTML** on
+  `max-age=0, must-revalidate` so the new references are picked up at once.
+- **"Some sections don't animate — it just jumps to the image"** → the scene is
+  showing its *still*, because the clip had not finished downloading when you
+  scrolled into it. This is almost always **loading**, not scroll height, overflow,
+  animation range, or reduced-motion — check those only after you have ruled loading
+  out. Two compounding causes, fix both:
+  1. **The chain is too heavy.** See Step 6 — a 31 MB chain cannot arrive on a
+     normal connection. Get it under ~10 MB.
+  2. **Loading started too late** — but fix this *only if the chain is small enough
+     to prefetch*, and measure before and after. An engine that fetches a clip only
+     once the visitor is within ~1.6vh of it gives the network about a second of
+     warning for a multi-MB file. `scrub-engine.js` can start an **eager, in-order
+     prefetch queue at mount** (2 concurrent, flight order), with proximity able to
+     *preempt* — and preempt must mean "start now, bypassing the concurrency cap",
+     not merely "move up the queue", or the urgent clip still waits behind whatever
+     is in flight.
+
+     **Eager whole-chain prefetch is NOT a universal win, and it made a working
+     build worse.** Measured 2026-09-02 on two sibling builds, 5 Mbps / 3s dwell:
+
+     | Build | Chain | Proximity loading | + eager whole-chain prefetch |
+     |---|---|---|---|
+     | 7 scenes, 9 MB | small | **0/7** scrubbing | **7/7** |
+     | 11 segments, ~20 MB | large | **11/11** | **9/11** |
+
+     The mechanism: background fetches compete for bandwidth with the clip the
+     visitor is actually about to reach. When the whole chain comfortably fits in
+     the time before it is needed, prefetching wins outright; when it does not, the
+     background fill starves the urgent clip and *removes* scenes that used to load
+     in time. So **bound the prefetch to a lookahead window** (the next 2–3 segments)
+     rather than the whole chain, or skip prefetching entirely on a heavy chain and
+     fix the transfer size instead — which is the more fundamental lever anyway.
+
+  **Diagnose it by measurement, not inspection** — the failure is invisible on a
+  fast connection, which is why it ships. Drive the page with CDP network throttling
+  and, per scene, record whether `video.currentTime` actually advances across that
+  scene's scroll band:
+
+  ```js
+  await cdp.send('Network.emulateNetworkConditions', {offline:false, latency:120,
+    downloadThroughput: 10*1024*1024/8, uploadThroughput: 750*1024/8});
+  // scroll in steps; per scene, span = max(currentTime) - min(currentTime)
+  // span ~0 with the still still showing == that scene never scrubbed
+  ```
+
+  Test at **5 and 10 Mbps**, with a few seconds of dwell before scrolling (a real
+  visitor reads the hero first). 25 Mbps passes even when the build is broken.
+  A late-arriving clip should also **dissolve** over its still rather than hard-cut;
+  the engine transitions both, so a slow scene degrades gracefully instead of popping.
 - **Frozen video / stuck at frame 0** → `seekable=[0,0]`; the host isn't serving byte
   ranges. Use blob URLs (engine does).
 - **Huge files** → you used all-intra. Use `-g 8` + blob instead.
@@ -980,6 +1073,16 @@ is the thing most likely to be wrong:
   fal→fal chaining needs no upload (result URLs are already public); locally-extracted
   frames need a host — fal storage, or the free Monid `sfs` helper (pipeline.md §7),
   which works even on an unfunded Monid account.
+- **A network error while polling is NOT a job failure** → `curl: (28) Failed to
+  connect to queue.fal.run` (or any transient curl exit) means *your poll* died, not
+  the render. fal keeps going server-side. A `fal_wait` that returns non-zero on a
+  curl failure makes the caller re-roll a clip that had already COMPLETED — you pay
+  twice and, on an arch-A chain, you throw away the frame lineage the next leg was
+  going to start from. Observed 2026-09-01: a 133 s connect timeout on a job whose
+  status was `COMPLETED` with the video sitting at `.video.url`. Retry the poll on a
+  network error (cap the retries), and only fail on a real terminal status from the
+  API. The `fal_wait` in pipeline.md §8 now does this — **before re-rolling any
+  "failed" clip, GET `…/requests/<id>` and check for a result you already paid for.**
 - **fal 401/403 vs 402** → 401/403 is a bad or missing `FAL_KEY`; 402 is an
   unfunded account. There is no balance endpoint on the queue path, so a completed
   cheap generation is the only real funding proof (Step 0.1).

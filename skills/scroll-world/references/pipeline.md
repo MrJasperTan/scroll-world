@@ -123,9 +123,16 @@ never upscale, encode what ffprobe reports), crf 20, GOP 8, light sharpen, no au
 faststart. Same for dives + connectors.
 
 ```bash
-enc() { ffmpeg -v error -y -i "$1" -an -vf "unsharp=5:5:0.8:5:5:0.0" \
-  -c:v libx264 -preset slow -crf 20 -pix_fmt yuv420p \
-  -g 8 -keyint_min 8 -sc_threshold 0 -movflags +faststart "$2"; echo "enc $2 $(du -h "$2"|cut -f1)"; }
+# ~1280w/crf26: transfer time is the binding constraint, and it is visually
+# indistinguishable from 1920w/crf20 on this kind of source. See SKILL Step 6 —
+# a 31MB chain scrubs 0/7 scenes at 5 Mbps; a 9MB chain scrubs 7/7.
+enc() { ffmpeg -v error -y -i "$1" -an -vf "scale=1280:-2,unsharp=5:5:0.8:5:5:0.0" \
+  -c:v libx264 -preset slow -crf 26 -pix_fmt yuv420p \
+  -g 8 -keyint_min 8 -sc_threshold 0 -movflags +faststart "$2"; echo "enc $2 $(stat -c%s "$2"|awk '{printf "%.1fMB",$1/1048576}')"; }
+
+# Posters come from the FULL-RES source, not the shrunken clip — they paint first,
+# they are ~150KB, and keeping them crisp costs nothing in transfer.
+poster() { ffmpeg -v error -y -ss 0 -i "$1" -frames:v 1 -q:v 3 -vf "scale=1600:-2" "$2"; }
 
 for n in $NAMES; do enc "$WORK/dive_$n.mp4" "$ASSETS/vid/$n.mp4"; done
 i=0; for f in "$WORK"/conn_*.mp4; do i=$((i+1)); enc "$f" "$ASSETS/vid/conn$i.mp4"; done
@@ -299,6 +306,8 @@ Auth is `Authorization: Key $FAL_KEY`. Every call is submit → poll → fetch; 
 first response never carries a result.
 
 ```bash
+# This user's fal key is persisted; load it if the shell doesn't already have it.
+[ -n "${FAL_KEY:-}" ] || [ ! -f "$HOME/.claude/secrets/fal.env" ] || . "$HOME/.claude/secrets/fal.env"
 : "${FAL_KEY:?export FAL_KEY first}"
 FAL_STILL=fal-ai/nano-banana-2
 FAL_EDIT=fal-ai/nano-banana-2/edit
@@ -316,16 +325,29 @@ fal_submit() { # model bodyJson
 
 # block until COMPLETED, then print the result payload. $1 is the APP id.
 fal_wait() { # appId requestId
-  local base="https://queue.fal.run/$1/requests/$2"
+  # A curl/network failure is NOT a job failure — fal keeps rendering server-side.
+  # Collapsing the two burns a paid clip and re-renders it (observed 2026-09-01:
+  # `curl: (28) Failed to connect ... after 133531 ms` on a job that had COMPLETED).
+  local base="https://queue.fal.run/$1/requests/$2" raw s net=0
   while :; do
-    case "$(curl -fsS -H "Authorization: Key $FAL_KEY" "$base/status" \
-            | jq -r '.status')" in
+    if ! raw=$(curl -fsS --max-time 30 -H "Authorization: Key $FAL_KEY" "$base/status" 2>/dev/null); then
+      net=$((net+1)); echo "poll network error ($net) for $2" >&2
+      [ $net -ge 40 ] && { echo "gave up polling $2" >&2; return 1; }
+      sleep 10; continue
+    fi
+    net=0; s=$(echo "$raw" | jq -r '.status // empty')
+    case "$s" in
       COMPLETED) break ;;
       IN_QUEUE|IN_PROGRESS) sleep 5 ;;
-      *) echo "fal job $2 failed" >&2; return 1 ;;
+      "") sleep 10 ;;                       # unparseable — transient, retry
+      *) echo "fal job $2 failed: $s" >&2; return 1 ;;
     esac
   done
-  curl -fsS -H "Authorization: Key $FAL_KEY" "$base"
+  for t in 1 2 3 4 5; do
+    raw=$(curl -fsS --max-time 60 -H "Authorization: Key $FAL_KEY" "$base") && { echo "$raw"; return 0; }
+    sleep 8
+  done
+  echo "could not fetch result for $2" >&2; return 1
 }
 
 # upload a LOCAL frame (an ffmpeg-extracted last frame) and print its public URL.
